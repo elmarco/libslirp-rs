@@ -1,0 +1,16 @@
+[package]
+name = "libslirp"
+version = "4.0.0"
+authors = ["Marc-André Lureau <marcandre.lureau@redhat.com>"]
+edition = "2018"
+
+[dependencies]
+libslirp-sys = "4.0.0"
+structopt = "0.2.14"
+mio = "0.6.16"
+mio-extras = "2.0.5"
+slab = "0.4.0"
+
+[patch.crates-io]
+mio = { git = "https://github.com/elmarco/mio", branch = "priority" }
+libslirp-sys = { git = "https://github.com/elmarco/libslirp-sys" }

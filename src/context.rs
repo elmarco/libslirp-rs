@@ -1,0 +1,465 @@
+use libslirp_sys::*;
+
+use crate::Opt;
+use std::cell::RefCell;
+use std::ffi::{CStr, CString};
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::os::raw::{c_char, c_int, c_void};
+use std::os::unix::io::RawFd;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::{fmt, mem, ops, slice, str};
+
+pub struct Context<H> {
+    inner: Box<Inner<H>>,
+}
+
+struct Inner<H> {
+    context: *mut Slirp,
+    callbacks: SlirpCb,
+    handler: H,
+}
+
+impl<H> Drop for Context<H> {
+    fn drop(&mut self) {
+        unsafe {
+            slirp_cleanup(self.inner.context);
+        }
+    }
+}
+
+unsafe impl<H: Send> Send for Inner<H> {}
+
+pub trait Handler {
+    type Timer;
+
+    fn clock_get_ns(&mut self) -> i64;
+
+    fn send_packet(&mut self, buf: &[u8]) -> isize;
+
+    fn set_nonblock(&mut self, fd: RawFd);
+
+    fn guest_error(&mut self, msg: &str);
+
+    fn notify(&mut self);
+
+    fn timer_new(&mut self, func: Box<dyn FnMut()>) -> Box<Self::Timer>;
+
+    fn timer_mod(&mut self, timer: &mut Box<Self::Timer>, expire_time: i64);
+
+    fn timer_free(&mut self, timer: Box<Self::Timer>);
+}
+
+impl<T: Handler> Handler for Rc<RefCell<T>> {
+    type Timer = T::Timer;
+
+    fn clock_get_ns(&mut self) -> i64 {
+        self.borrow_mut().clock_get_ns()
+    }
+
+    fn send_packet(&mut self, buf: &[u8]) -> isize {
+        self.borrow_mut().send_packet(buf)
+    }
+
+    fn set_nonblock(&mut self, fd: RawFd) {
+        self.borrow_mut().set_nonblock(fd);
+    }
+
+    fn guest_error(&mut self, msg: &str) {
+        self.borrow_mut().guest_error(msg);
+    }
+
+    fn notify(&mut self) {
+        self.borrow_mut().notify();
+    }
+
+    fn timer_new(&mut self, func: Box<dyn FnMut()>) -> Box<Self::Timer> {
+        self.borrow_mut().timer_new(func)
+    }
+
+    fn timer_mod(&mut self, timer: &mut Box<Self::Timer>, expire_time: i64) {
+        self.borrow_mut().timer_mod(timer, expire_time)
+    }
+
+    fn timer_free(&mut self, timer: Box<Self::Timer>) {
+        self.borrow_mut().timer_free(timer)
+    }
+}
+
+extern "C" fn write_handler_cl(buf: *const c_void, len: usize, opaque: *mut c_void) -> isize {
+    let closure: &mut &mut FnMut(&[u8]) -> isize = unsafe { mem::transmute(opaque) };
+    let slice = unsafe { slice::from_raw_parts(buf as *const u8, len) };
+
+    closure(slice)
+}
+
+extern "C" fn read_handler_cl(buf: *mut c_void, len: usize, opaque: *mut c_void) -> isize {
+    let closure: &mut &mut FnMut(&mut [u8]) -> isize = unsafe { mem::transmute(opaque) };
+    let slice = unsafe { slice::from_raw_parts_mut(buf as *mut u8, len) };
+
+    closure(slice)
+}
+
+#[derive(Copy, PartialEq, Eq, Clone, PartialOrd, Ord)]
+pub struct PollEvents(usize);
+
+impl PollEvents {
+    pub fn empty() -> Self {
+        PollEvents(0)
+    }
+    pub fn poll_in() -> Self {
+        PollEvents(SLIRP_POLL_IN as usize)
+    }
+    pub fn poll_out() -> Self {
+        PollEvents(SLIRP_POLL_OUT as usize)
+    }
+    pub fn poll_pri() -> Self {
+        PollEvents(SLIRP_POLL_PRI as usize)
+    }
+    pub fn poll_err() -> Self {
+        PollEvents(SLIRP_POLL_ERR as usize)
+    }
+    pub fn poll_hup() -> Self {
+        PollEvents(SLIRP_POLL_HUP as usize)
+    }
+    pub fn contains<T: Into<Self>>(&self, other: T) -> bool {
+        let other = other.into();
+        (*self & other) == other
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+    pub fn has_in(&self) -> bool {
+        self.contains(PollEvents::poll_in())
+    }
+    pub fn has_out(&self) -> bool {
+        self.contains(PollEvents::poll_out())
+    }
+    pub fn has_pri(&self) -> bool {
+        self.contains(PollEvents::poll_pri())
+    }
+    pub fn has_err(&self) -> bool {
+        self.contains(PollEvents::poll_err())
+    }
+    pub fn has_hup(&self) -> bool {
+        self.contains(PollEvents::poll_hup())
+    }
+}
+
+impl<T: Into<PollEvents>> ops::BitAnd<T> for PollEvents {
+    type Output = PollEvents;
+
+    fn bitand(self, other: T) -> PollEvents {
+        PollEvents(self.0 & other.into().0)
+    }
+}
+
+impl<T: Into<PollEvents>> ops::BitOr<T> for PollEvents {
+    type Output = PollEvents;
+
+    fn bitor(self, other: T) -> PollEvents {
+        PollEvents(self.0 | other.into().0)
+    }
+}
+
+impl<T: Into<PollEvents>> ops::BitOrAssign<T> for PollEvents {
+    fn bitor_assign(&mut self, other: T) {
+        self.0 |= other.into().0;
+    }
+}
+
+impl fmt::Debug for PollEvents {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        let mut one = false;
+        let flags = [
+            (PollEvents(SLIRP_POLL_IN as usize), "IN"),
+            (PollEvents(SLIRP_POLL_OUT as usize), "OUT"),
+            (PollEvents(SLIRP_POLL_PRI as usize), "PRI"),
+            (PollEvents(SLIRP_POLL_ERR as usize), "ERR"),
+            (PollEvents(SLIRP_POLL_HUP as usize), "HUP"),
+        ];
+
+        for &(flag, msg) in &flags {
+            if self.contains(flag) {
+                if one {
+                    write!(fmt, " | ")?
+                }
+                write!(fmt, "{}", msg)?;
+
+                one = true
+            }
+        }
+
+        if !one {
+            fmt.write_str("(empty)")?;
+        }
+
+        Ok(())
+    }
+}
+
+extern "C" fn add_poll_handler_cl(fd: c_int, events: c_int, opaque: *mut c_void) -> c_int {
+    let closure: &mut &mut FnMut(RawFd, PollEvents) -> i32 = unsafe { mem::transmute(opaque) };
+
+    closure(fd, PollEvents(events as usize))
+}
+
+extern "C" fn get_revents_handler_cl(idx: c_int, opaque: *mut c_void) -> c_int {
+    let closure: &mut &mut FnMut(i32) -> PollEvents = unsafe { mem::transmute(opaque) };
+
+    closure(idx).0 as c_int
+}
+
+extern "C" fn send_packet_handler<H: Handler>(
+    buf: *const c_void,
+    len: usize,
+    opaque: *mut c_void,
+) -> isize {
+    let slice = unsafe { slice::from_raw_parts(buf as *const u8, len) };
+    unsafe { (*(opaque as *mut Inner<H>)).handler.send_packet(slice) }
+}
+
+extern "C" fn guest_error_handler<H: Handler>(msg: *const c_char, opaque: *mut c_void) {
+    let msg = str::from_utf8(unsafe { CStr::from_ptr(msg) }.to_bytes()).unwrap_or("");
+    unsafe { (*(opaque as *mut Inner<H>)).handler.guest_error(msg) }
+}
+
+extern "C" fn clock_get_ns_handler<H: Handler>(opaque: *mut c_void) -> i64 {
+    unsafe { (*(opaque as *mut Inner<H>)).handler.clock_get_ns() }
+}
+
+extern "C" fn timer_new_handler<H: Handler>(
+    cb: SlirpTimerCb,
+    cb_opaque: *mut c_void,
+    opaque: *mut c_void,
+) -> *mut c_void {
+    let func = Box::new(move || {
+        if let Some(cb) = cb {
+            unsafe {
+                cb(cb_opaque);
+            }
+        }
+    });
+    let timer = unsafe { (*(opaque as *mut Inner<H>)).handler.timer_new(func) };
+    Box::into_raw(timer) as *mut c_void
+}
+
+extern "C" fn timer_free_handler<H: Handler>(timer: *mut c_void, opaque: *mut c_void) {
+    unsafe {
+        let timer = Box::from_raw(timer as *mut H::Timer);
+        (*(opaque as *mut Inner<H>)).handler.timer_free(timer);
+    }
+}
+
+extern "C" fn timer_mod_handler<H: Handler>(
+    timer: *mut c_void,
+    expire_time: i64,
+    opaque: *mut c_void,
+) {
+    unsafe {
+        let mut timer = Box::from_raw(timer as *mut H::Timer);
+        (*(opaque as *mut Inner<H>))
+            .handler
+            .timer_mod(&mut timer, expire_time);
+        Box::into_raw(timer);
+    }
+}
+
+extern "C" fn set_nonblock_handler<H: Handler>(fd: c_int, opaque: *mut c_void) {
+    unsafe { (*(opaque as *mut Inner<H>)).handler.set_nonblock(fd) }
+}
+
+extern "C" fn notify_handler<H: Handler>(opaque: *mut c_void) {
+    unsafe { (*(opaque as *mut Inner<H>)).handler.notify() }
+}
+
+impl<H: Handler> Context<H> {
+    pub fn new_with_opt(opt: &Opt, handler: H) -> Self {
+        Self::new(
+            opt.restrict,
+            !opt.ipv4.disable,
+            opt.ipv4.net,
+            opt.ipv4.mask,
+            opt.ipv4.host,
+            !opt.ipv6.disable,
+            opt.ipv6.prefix,
+            opt.ipv6.prefix_len,
+            opt.ipv6.host,
+            opt.hostname.clone(),
+            opt.tftp.name.clone(),
+            opt.tftp.root.clone(),
+            opt.tftp.bootfile.clone(),
+            opt.ipv4.dhcp_start,
+            opt.ipv4.dns,
+            opt.ipv6.dns,
+            opt.dns_suffixes.clone(),
+            opt.domainname.clone(),
+            handler,
+        )
+    }
+
+    pub fn new(
+        restricted: bool,
+        ipv4_enabled: bool,
+        vnetwork: Ipv4Addr,
+        vnetmask: Ipv4Addr,
+        vhost: Ipv4Addr,
+        ipv6_enabled: bool,
+        vprefix_addr6: Ipv6Addr,
+        vprefix_len: u8,
+        vhost6: Ipv6Addr,
+        vhostname: Option<String>,
+        tftp_server_name: Option<String>,
+        tftp_path: Option<PathBuf>,
+        tftp_bootfile: Option<String>,
+        vdhcp_start: Ipv4Addr,
+        vnameserver: Ipv4Addr,
+        vnameserver6: Ipv6Addr,
+        vdnssearch: Vec<String>,
+        vdomainname: Option<String>,
+        handler: H,
+    ) -> Self {
+        let mut ret = Context {
+            inner: Box::new(Inner {
+                context: std::ptr::null_mut(),
+                callbacks: SlirpCb {
+                    send_packet: Some(send_packet_handler::<H>),
+                    guest_error: Some(guest_error_handler::<H>),
+                    clock_get_ns: Some(clock_get_ns_handler::<H>),
+                    timer_new: Some(timer_new_handler::<H>),
+                    timer_free: Some(timer_free_handler::<H>),
+                    timer_mod: Some(timer_mod_handler::<H>),
+                    set_nonblock: Some(set_nonblock_handler::<H>),
+                    notify: Some(notify_handler::<H>),
+                },
+                handler,
+            }),
+        };
+
+        let cstr_vdns: Vec<_> = vdnssearch
+            .iter()
+            .map(|arg| CString::new(arg.clone().into_bytes()).unwrap())
+            .collect();
+        let mut p_vdns: Vec<_> = cstr_vdns.iter().map(|arg| arg.as_ptr()).collect();
+        p_vdns.push(std::ptr::null());
+
+        let as_ptr = |p: &Option<CString>| p.as_ref().map_or(std::ptr::null(), |s| s.as_ptr());
+
+        let tftp_path = tftp_path.and_then(|s| CString::new(s.to_string_lossy().into_owned()).ok());
+        let vhostname = vhostname.and_then(|s| CString::new(s).ok());
+        let tftp_server_name = tftp_server_name.and_then(|s| CString::new(s).ok());
+        let tftp_bootfile = tftp_bootfile.and_then(|s| CString::new(s).ok());
+        let vdomainname = vdomainname.and_then(|s| CString::new(s).ok());
+
+        let ptr = &*ret.inner as *const _ as *mut _;
+        ret.inner.context = unsafe {
+            slirp_init(
+                restricted as i32,
+                ipv4_enabled,
+                vnetwork.into(),
+                vnetmask.into(),
+                vhost.into(),
+                ipv6_enabled,
+                vprefix_addr6.into(),
+                vprefix_len,
+                vhost6.into(),
+                as_ptr(&vhostname),
+                as_ptr(&tftp_server_name),
+                as_ptr(&tftp_path),
+                as_ptr(&tftp_bootfile),
+                vdhcp_start.into(),
+                vnameserver.into(),
+                vnameserver6.into(),
+                p_vdns.as_ptr() as *mut *const _,
+                as_ptr(&vdomainname),
+                &ret.inner.callbacks,
+                ptr,
+            )
+        };
+
+        assert!(!ret.inner.context.is_null());
+        ret
+    }
+
+    pub fn input(&mut self, buf: &[u8]) {
+        unsafe {
+            slirp_input(self.inner.context, buf.as_ptr(), buf.len() as i32);
+        }
+    }
+
+    pub fn connection_info(&mut self) -> &str {
+        str::from_utf8(
+            unsafe { CStr::from_ptr(slirp_connection_info(self.inner.context)) }.to_bytes(),
+        )
+        .unwrap_or("")
+    }
+
+    pub fn pollfds_fill<F>(&mut self, timeout: &mut u32, mut add_poll_cb: F)
+    where
+        F: FnMut(RawFd, PollEvents) -> i32,
+    {
+        let mut cb: &mut FnMut(RawFd, PollEvents) -> i32 = &mut add_poll_cb;
+        let cb = &mut cb;
+
+        unsafe {
+            slirp_pollfds_fill(
+                self.inner.context,
+                timeout,
+                Some(add_poll_handler_cl),
+                cb as *mut _ as *mut c_void,
+            );
+        }
+    }
+
+    pub fn pollfds_poll<F>(&mut self, error: bool, mut get_revents_cb: F)
+    where
+        F: FnMut(i32) -> PollEvents,
+    {
+        let mut cb: &mut FnMut(i32) -> PollEvents = &mut get_revents_cb;
+        let cb = &mut cb;
+
+        unsafe {
+            slirp_pollfds_poll(
+                self.inner.context,
+                error as i32,
+                Some(get_revents_handler_cl),
+                cb as *mut _ as *mut c_void,
+            );
+        }
+    }
+
+    // could have a wrapper for F: Write?
+    pub fn state_save<F>(&mut self, mut write_cb: F)
+    where
+        F: FnMut(&[u8]) -> isize,
+    {
+        let mut cb: &mut FnMut(&[u8]) -> isize = &mut write_cb;
+        let cb = &mut cb;
+
+        unsafe {
+            slirp_state_save(
+                self.inner.context,
+                Some(write_handler_cl),
+                cb as *mut _ as *mut c_void,
+            );
+        }
+    }
+
+    // could have a wrapper for F: Read?
+    pub fn state_load<F>(&mut self, version_id: i32, mut read_cb: F)
+    where
+        F: FnMut(&mut [u8]) -> isize,
+    {
+        let mut cb: &mut FnMut(&mut [u8]) -> isize = &mut read_cb;
+        let cb = &mut cb;
+
+        unsafe {
+            slirp_state_load(
+                self.inner.context,
+                version_id,
+                Some(read_handler_cl),
+                cb as *mut _ as *mut c_void,
+            );
+        }
+    }
+}
