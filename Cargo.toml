@@ -2,6 +2,11 @@
 name = "libslirp"
 version = "4.0.0"
 authors = ["Marc-André Lureau <marcandre.lureau@redhat.com>"]
+repository = "https://github.com/elmarco/libslirp-rs"
+homepage = "https://github.com/elmarco/libslirp-rs"
+documentation = "https://docs.rs/libslirp"
+description = "High-level bindings for libslirp."
+license = "MIT"
 edition = "2018"
 
 [dependencies]
