@@ -77,9 +77,15 @@ impl<'a> libslirp::Handler for App<'a> {
         eprintln!("guest error: {}", msg);
     }
 
-    fn set_nonblock(&mut self, fd: RawFd) {
+    fn register_poll_fd(&mut self, fd: RawFd) {
         if self.opt.debug {
-            println!("set_nonblock: fd={:?}", fd);
+            println!("register_poll_fd: fd={:?}", fd);
+        }
+    }
+
+    fn unregister_poll_fd(&mut self, fd: RawFd) {
+        if self.opt.debug {
+            println!("unregister_poll_fd: fd={:?}", fd);
         }
     }
 

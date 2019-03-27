@@ -37,7 +37,9 @@ pub trait Handler {
 
     fn send_packet(&mut self, buf: &[u8]) -> isize;
 
-    fn set_nonblock(&mut self, fd: RawFd);
+    fn register_poll_fd(&mut self, fd: RawFd);
+
+    fn unregister_poll_fd(&mut self, fd: RawFd);
 
     fn guest_error(&mut self, msg: &str);
 
@@ -61,8 +63,12 @@ impl<T: Handler> Handler for Rc<RefCell<T>> {
         self.borrow_mut().send_packet(buf)
     }
 
-    fn set_nonblock(&mut self, fd: RawFd) {
-        self.borrow_mut().set_nonblock(fd);
+    fn register_poll_fd(&mut self, fd: RawFd) {
+        self.borrow_mut().register_poll_fd(fd);
+    }
+
+    fn unregister_poll_fd(&mut self, fd: RawFd) {
+        self.borrow_mut().unregister_poll_fd(fd);
     }
 
     fn guest_error(&mut self, msg: &str) {
@@ -265,8 +271,12 @@ extern "C" fn timer_mod_handler<H: Handler>(
     }
 }
 
-extern "C" fn set_nonblock_handler<H: Handler>(fd: c_int, opaque: *mut c_void) {
-    unsafe { (*(opaque as *mut Inner<H>)).handler.set_nonblock(fd) }
+extern "C" fn register_poll_fd_handler<H: Handler>(fd: c_int, opaque: *mut c_void) {
+    unsafe { (*(opaque as *mut Inner<H>)).handler.register_poll_fd(fd) }
+}
+
+extern "C" fn unregister_poll_fd_handler<H: Handler>(fd: c_int, opaque: *mut c_void) {
+    unsafe { (*(opaque as *mut Inner<H>)).handler.unregister_poll_fd(fd) }
 }
 
 extern "C" fn notify_handler<H: Handler>(opaque: *mut c_void) {
@@ -329,7 +339,8 @@ impl<H: Handler> Context<H> {
                     timer_new: Some(timer_new_handler::<H>),
                     timer_free: Some(timer_free_handler::<H>),
                     timer_mod: Some(timer_mod_handler::<H>),
-                    set_nonblock: Some(set_nonblock_handler::<H>),
+                    register_poll_fd: Some(register_poll_fd_handler::<H>),
+                    unregister_poll_fd: Some(unregister_poll_fd_handler::<H>),
                     notify: Some(notify_handler::<H>),
                 },
                 handler,

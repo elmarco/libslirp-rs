@@ -17,5 +17,4 @@ mio-extras = "2.0.5"
 slab = "0.4.0"
 
 [patch.crates-io]
-mio = { git = "https://github.com/elmarco/mio", branch = "priority" }
 libslirp-sys = { git = "https://github.com/elmarco/libslirp-sys" }
