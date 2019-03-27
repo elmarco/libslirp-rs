@@ -62,6 +62,7 @@ pub struct OptTftp {
 }
 
 #[derive(Debug, StructOpt)]
+#[structopt(name = "slirp-opt")]
 pub struct Opt {
     /// Isolate guest from host
     #[structopt(long, short)]
