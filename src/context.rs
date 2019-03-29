@@ -399,6 +399,8 @@ impl<H: Handler> Context<H> {
         ret
     }
 
+    // FIXME: all methods take &mut self, but could they be immutable instead?
+    // This would simplify a lot of code, allowing immutable aliases
     pub fn input(&mut self, buf: &[u8]) {
         unsafe {
             slirp_input(self.inner.context, buf.as_ptr(), buf.len() as i32);
