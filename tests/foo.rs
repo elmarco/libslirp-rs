@@ -1,5 +1,6 @@
 use etherparse::{PacketBuilder, TcpOptionElement};
 use libslirp;
+use std::io;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
@@ -23,9 +24,9 @@ impl libslirp::Handler for App {
         drop(timer);
     }
 
-    fn send_packet(&mut self, buf: &[u8]) -> isize {
+    fn send_packet(&mut self, buf: &[u8]) -> io::Result<usize> {
         //self.stream.send(buf).unwrap() as isize
-        buf.len() as isize
+        Ok(buf.len())
     }
 
     fn guest_error(&mut self, msg: &str) {

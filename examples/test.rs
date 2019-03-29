@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::io;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
@@ -69,8 +70,8 @@ impl<'a> libslirp::Handler for App<'a> {
         drop(timer); // for clarity
     }
 
-    fn send_packet(&mut self, buf: &[u8]) -> isize {
-        self.stream.send(buf).unwrap() as isize
+    fn send_packet(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.send(buf)
     }
 
     fn guest_error(&mut self, msg: &str) {

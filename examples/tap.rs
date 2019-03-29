@@ -41,9 +41,8 @@ impl libslirp::Handler for App {
         drop(timer);
     }
 
-    fn send_packet(&mut self, buf: &[u8]) -> isize {
-        //self.stream.send(buf).unwrap() as isize
-        self.iface.send(buf).unwrap() as isize
+    fn send_packet(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.iface.send(buf)
     }
 
     fn guest_error(&mut self, msg: &str) {

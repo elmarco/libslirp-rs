@@ -3,6 +3,7 @@ use libslirp_sys::*;
 use crate::Opt;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
+use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::io::RawFd;
@@ -35,7 +36,7 @@ pub trait Handler {
 
     fn clock_get_ns(&mut self) -> i64;
 
-    fn send_packet(&mut self, buf: &[u8]) -> isize;
+    fn send_packet(&mut self, buf: &[u8]) -> io::Result<usize>;
 
     fn register_poll_fd(&mut self, fd: RawFd);
 
@@ -59,7 +60,7 @@ impl<T: Handler> Handler for Rc<RefCell<T>> {
         self.borrow_mut().clock_get_ns()
     }
 
-    fn send_packet(&mut self, buf: &[u8]) -> isize {
+    fn send_packet(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.borrow_mut().send_packet(buf)
     }
 
@@ -222,7 +223,13 @@ extern "C" fn send_packet_handler<H: Handler>(
     opaque: *mut c_void,
 ) -> isize {
     let slice = unsafe { slice::from_raw_parts(buf as *const u8, len) };
-    unsafe { (*(opaque as *mut Inner<H>)).handler.send_packet(slice) }
+    let res = unsafe { (*(opaque as *mut Inner<H>)).handler.send_packet(slice) };
+    if res.is_ok() {
+        res.unwrap() as isize
+    } else {
+        eprintln!("send_packet error: {}", res.unwrap_err());
+        -1
+    }
 }
 
 extern "C" fn guest_error_handler<H: Handler>(msg: *const c_char, opaque: *mut c_void) {
