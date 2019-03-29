@@ -1,4 +1,4 @@
-use etherparse::PacketBuilder;
+use etherparse::{PacketBuilder, TcpOptionElement};
 use libslirp;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::time::{Duration, Instant};
@@ -51,30 +51,68 @@ struct App {
 
 #[test]
 fn ip() {
-    let builder = PacketBuilder::ethernet2(
-        [1, 2, 3, 4, 5, 6], //source mac
-        [7, 8, 9, 10, 11, 12],
-    ) //destination mac
-    .ipv4(
-        [192, 168, 1, 1], //source ip
-        [192, 168, 1, 2], //desitination ip
-        20,
-    ) //time to life
-    .udp(
-        21, //source port
-        1234,
-    ); //desitnation port
-
-    //payload of the udp packet
-    let payload = [1, 2, 3, 4, 5, 6, 7, 8];
-    let mut buffer = Vec::<u8>::with_capacity(builder.size(payload.len()));
-    builder.write(&mut buffer, &payload).unwrap();
-
     let opt = libslirp::Opt::from_args();
     let app = App {
         start: Instant::now(),
     };
     let mut ctxt = libslirp::Context::new_with_opt(&opt, app);
 
-    ctxt.input(&buffer);
+    {
+        let builder = PacketBuilder::ethernet2(
+            [1, 2, 3, 4, 5, 6],    //source mac
+            [7, 8, 9, 10, 11, 12], //destination mac
+        )
+        .ipv4(
+            [192, 168, 1, 1], //source ip
+            [192, 168, 1, 2], //desitination ip
+            20,               //time to life
+        )
+        .udp(
+            21,   //source port
+            1234, //desitnation port
+        );
+
+        //payload of the udp packet
+        let payload = [1, 2, 3, 4, 5, 6, 7, 8];
+        let mut buffer = Vec::<u8>::with_capacity(builder.size(payload.len()));
+        builder.write(&mut buffer, &payload).unwrap();
+
+        ctxt.input(&buffer);
+    }
+
+    {
+        let builder = PacketBuilder::ethernet2(
+            [1, 2, 3, 4, 5, 6],    //source mac
+            [7, 8, 9, 10, 11, 12], //destionation mac
+        )
+        .ipv4(
+            [192, 168, 1, 1], //source ip
+            [192, 168, 1, 2], //desitionation ip
+            20,               //time to life
+        )
+        .tcp(
+            21,    //source port
+            1234,  //desitnation port
+            1,     //sequence number
+            26180, //window size
+        )
+        //set additional tcp header fields
+        .ns() //set the ns flag
+        //supported flags: ns(), fin(), syn(), rst(), psh(), ece(), cwr()
+        .ack(123) //ack flag + the ack number
+        .urg(23) //urg flag + urgent pointer
+        //tcp header options
+        .options(&[
+            TcpOptionElement::Nop,
+            TcpOptionElement::MaximumSegmentSize(1234),
+        ])
+        .unwrap();
+
+        //payload of the tcp packet
+        let payload = [1, 2, 3, 4, 5, 6, 7, 8];
+        //get some memory to store the result
+        let mut buffer = Vec::<u8>::with_capacity(builder.size(payload.len()));
+        builder.write(&mut buffer, &payload).unwrap();
+        ctxt.input(&buffer);
+    }
 }
