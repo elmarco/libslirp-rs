@@ -11,6 +11,7 @@ edition = "2018"
 
 [dependencies]
 libslirp-sys = "4.0.0"
+# make it option features
 structopt = "0.2.14"
 mio = "0.6.16"
 mio-extras = "2.0.5"

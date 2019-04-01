@@ -29,7 +29,7 @@ impl<H> Drop for Context<H> {
     }
 }
 
-unsafe impl<H: Send> Send for Inner<H> {}
+//unsafe impl<H: Send> Send for Inner<H> {}
 
 pub trait Handler {
     type Timer;
