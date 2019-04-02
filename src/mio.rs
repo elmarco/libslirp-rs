@@ -6,6 +6,7 @@ use mio::*;
 use mio_extras::timer::Timer as MioTimer;
 use slab::Slab;
 use std::cell::RefCell;
+use std::fmt;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
@@ -16,6 +17,12 @@ use std::time::{Duration, Instant};
 struct MyTimer {
     func: Rc<RefCell<Box<dyn FnMut()>>>,
     timer: MioTimer<()>,
+}
+
+impl fmt::Debug for MyTimer {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "MyTimer {{}}")
+    }
 }
 
 #[derive(Debug)]
@@ -35,6 +42,7 @@ impl MyFd {
     }
 }
 
+#[derive(Debug)]
 enum MyToken {
     Fd(MyFd),
     Timer(MyTimer),
@@ -213,6 +221,15 @@ impl<'a> MioHandler<'a> {
     }
 
     pub fn dispatch(&mut self, events: &Events) -> io::Result<Option<Duration>> {
+        let inner = self.inner.clone();
+
+        for (_, token) in inner.borrow().tokens.iter() {
+            if let MyToken::Fd(fd) = token {
+                let ev = EventedFd(&fd.fd);
+                inner.borrow().poll.deregister(&ev)?;
+            }
+        }
+
         for event in events {
             match event.token() {
                 SOCKET => {
@@ -229,7 +246,7 @@ impl<'a> MioHandler<'a> {
                 }
                 i => {
                     let events = from_mio_ready(event.readiness());
-                    let mut inner = self.inner.borrow_mut();
+                    let mut inner = inner.borrow_mut();
                     let token = &mut inner.tokens[i.0];
 
                     match token {
@@ -248,7 +265,6 @@ impl<'a> MioHandler<'a> {
             }
         }
 
-        let inner = self.inner.clone();
         self.ctxt.pollfds_poll(false, |idx| {
             let token = &mut inner.borrow_mut().tokens[idx as usize];
             if let MyToken::Fd(fd) = token {
@@ -258,18 +274,10 @@ impl<'a> MioHandler<'a> {
             }
         });
 
-        let mut to_remove = vec![];
-        for (idx, token) in self.inner.borrow().tokens.iter() {
-            if let MyToken::Fd(fd) = token {
-                let ev = EventedFd(&fd.fd);
-                // fixme crash here invalid fd
-                self.inner.borrow().poll.deregister(&ev).unwrap();
-                to_remove.push(idx);
-            }
-        }
-        for idx in to_remove.iter() {
-            self.inner.borrow_mut().tokens.remove(*idx);
-        }
+        inner
+            .borrow_mut()
+            .tokens
+            .retain(|_, v| if let MyToken::Fd(_) = v { false } else { true });
 
         let mut timeout = 0;
         self.ctxt.pollfds_fill(&mut timeout, |fd, events| {
