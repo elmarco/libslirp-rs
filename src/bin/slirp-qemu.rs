@@ -4,6 +4,7 @@ use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixDatagram;
 use std::path::PathBuf;
 
+use libc;
 use libslirp;
 use mio::{Events, Poll};
 use structopt::StructOpt;
@@ -14,6 +15,9 @@ struct Opt {
     /// Activate debug mode
     #[structopt(long)]
     debug: bool,
+    /// Exit with parent process
+    #[structopt(long = "exit-with-parent")]
+    exit_with_parent: bool,
     /// Unix datagram socket path
     #[structopt(name = "path", parse(from_os_str), long = "socket-path")]
     socket_path: Option<PathBuf>,
@@ -23,6 +27,13 @@ struct Opt {
 
     #[structopt(flatten)]
     slirp: libslirp::Opt,
+}
+
+fn set_exit_with_parent() {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM, 0, 0, 0);
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -38,6 +49,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         } => UnixDatagram::bind(path)?,
         _ => panic!("Missing a socket argument"),
     };
+
+    if opt.exit_with_parent {
+        set_exit_with_parent();
+    }
 
     let poll = Poll::new()?;
     let mut slirp = libslirp::MioHandler::new(&opt.slirp, &poll, stream.as_raw_fd());
